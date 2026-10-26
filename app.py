@@ -171,7 +171,28 @@ def combined_chart(data: pd.DataFrame, country1: str, country2: str) -> go.Figur
     fig.add_hline(y=100, line_dash='dash', line_color='gray', opacity=0.5, secondary_y=False)
     fig.update_yaxes(title_text='Real exchange rate index (sample mean = 100)', secondary_y=False)
     fig.update_yaxes(title_text=f'Nominal: {country2} units per {country1} unit', secondary_y=True)
-    fig.update_layout(title='Real and nominal exchange rates · dual axis', hovermode='x unified', height=480, legend=dict(orientation='h', y=1.13), margin=dict(l=35, r=35, t=80, b=40))
+    fig.update_layout(
+        title=dict(
+            text='Real vs. Nominal Exchange Rate',
+            x=0.02,
+            xanchor='left',
+            y=0.97,
+            yanchor='top',
+            font=dict(size=19),
+        ),
+        hovermode='x unified',
+        height=540,
+        margin=dict(l=45, r=65, t=125, b=50),
+        legend=dict(
+            orientation='h',
+            x=0,
+            xanchor='left',
+            y=1.08,
+            yanchor='bottom',
+            font=dict(size=12),
+            bgcolor='rgba(0,0,0,0)',
+        ),
+    )
     fig.update_xaxes(title_text='Month', rangeslider_visible=True)
     return fig
 
