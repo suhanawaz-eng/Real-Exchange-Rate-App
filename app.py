@@ -21,7 +21,7 @@ CODES = sorted(COUNTRIES, key=lambda c: (c != 'G163', COUNTRIES[c].lower()))
 
 st.set_page_config(page_title='IMF Real Exchange Rate Explorer', page_icon='🌍', layout='wide')
 st.title('🌍 IMF Real Exchange Rate Explorer')
-st.caption('Monthly IMF CPI and exchange rates · January 1976 onward, where available')
+st.caption('Monthly IMF CPI and exchange rates; Eurostat HICP for Euro Area · January 1976 onward, where available')
 
 
 def period_to_date(value: object) -> pd.Timestamp:
@@ -78,9 +78,57 @@ def fetch_series(country: str, dataset: str) -> tuple[pd.Series, str]:
         return pd.Series(dtype='float64', name=f'{dataset}_{country}'), f'{exc} | Flow: {flow} | Key: {key}'
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_eurostat_ea_hicp() -> tuple[pd.Series, str]:
+    """Eurostat HICP: EA, all items, monthly index (2025=100)."""
+    url = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/prc_hicp_minr"
+    params = {"geo": "EA", "coicop18": "TOTAL", "unit": "I25", "freq": "M", "lang": "EN"}
+    try:
+        response = requests.get(url, params=params, timeout=60,
+                                headers={"User-Agent": "IMF-RER-Explorer/2.1"})
+        response.raise_for_status()
+        obj = response.json()
+        dims = obj.get("id", [])
+        sizes = obj.get("size", [])
+        if "time" not in dims or len(dims) != len(sizes):
+            raise ValueError(f"Unexpected Eurostat dimensions: {dims}")
+        # Fail closed if the response contains multiple series rather than one
+        # explicitly filtered monthly EA / TOTAL / I25 series.
+        expected = {"geo": "EA", "coicop18": "TOTAL", "unit": "I25", "freq": "M"}
+        for dim, code in expected.items():
+            if dim not in dims:
+                raise ValueError(f"Missing Eurostat dimension {dim}")
+            category = obj["dimension"][dim]["category"]["index"]
+            if list(category) != [code]:
+                raise ValueError(f"Unexpected Eurostat {dim} values: {list(category)}")
+        if any(sizes[i] != 1 for i, dim in enumerate(dims) if dim != "time"):
+            raise ValueError("Eurostat returned multiple non-time series")
+        times = obj["dimension"]["time"]["category"]["index"]
+        if isinstance(times, dict):
+            periods = sorted(times, key=lambda t: times[t])
+        else:
+            raise ValueError("Unexpected Eurostat time index format")
+        values = obj.get("value", {})
+        result = {}
+        for i, period in enumerate(periods):
+            val = values.get(str(i)) if isinstance(values, dict) else values[i]
+            if val is None:
+                continue
+            date_value = pd.to_datetime(str(period)[:7] + "-01", errors="coerce")
+            number = pd.to_numeric(val, errors="coerce")
+            if pd.notna(date_value) and pd.notna(number) and number > 0 and date_value >= START:
+                result[date_value] = float(number)
+        if not result:
+            raise ValueError("No valid Eurostat monthly EA HICP observations")
+        return pd.Series(result, name="HICP_G163", dtype="float64").sort_index(), ""
+    except (requests.RequestException, ValueError, KeyError, TypeError, IndexError) as exc:
+        return pd.Series(dtype="float64", name="HICP_G163"), f"Eurostat prc_hicp_minr / EA / TOTAL / I25: {exc}"
+
+
 def calculate(country1: str, country2: str, start: pd.Timestamp, end: pd.Timestamp):
     identifiers = [(country1, 'CPI'), (country2, 'CPI'), (country1, 'FX'), (country2, 'FX')]
-    results = [fetch_series(country, kind) for country, kind in identifiers]
+    results = [fetch_eurostat_ea_hicp() if country == 'G163' and kind == 'CPI'
+               else fetch_series(country, kind) for country, kind in identifiers]
     months = pd.date_range(start, end, freq='MS')
     data = pd.DataFrame(index=months)
     for name, (series, _) in zip(['P1_CPI', 'P2_CPI', 'E1_per_USD', 'E2_per_USD'], results):
@@ -98,7 +146,7 @@ def calculate(country1: str, country2: str, start: pd.Timestamp, end: pd.Timesta
             'Status': 'Available' if len(series) else 'Unavailable', 'Observations': len(series),
             'First month': series.index.min().strftime('%Y-%m') if len(series) else '—',
             'Last month': series.index.max().strftime('%Y-%m') if len(series) else '—',
-            'Details': error or 'Exact requested IMF series retrieved'})
+            'Details': error or ('Eurostat HICP: prc_hicp_minr, EA, TOTAL, I25 (2025=100)' if country == 'G163' and kind == 'CPI' else 'Exact requested IMF series retrieved')})
     return data, mean, count, pd.DataFrame(diagnostics)
 
 
@@ -139,8 +187,9 @@ with st.sidebar:
     st.header('Chart selection')
     selection = st.radio('Display', ['Real', 'Nominal', 'Both'], index=2)
     st.caption('Dates are interpreted by month; the day of month is ignored.')
-    if st.button('Refresh IMF cache'):
+    if st.button('Refresh data cache'):
         fetch_series.clear()
+        fetch_eurostat_ea_hicp.clear()
         st.rerun()
 
 start = pd.Timestamp(start_month).to_period('M').to_timestamp()
@@ -154,14 +203,14 @@ if start > end:
 
 st.markdown(f'**Country 1:** {COUNTRIES[c1]} ({c1}) &nbsp; | &nbsp; **Country 2:** {COUNTRIES[c2]} ({c2})')
 st.latex(r'S(t)=\frac{E_2(t)}{E_1(t)}\qquad RER(t)=S(t)\frac{P_1(t)}{P_2(t)}\qquad RealIndex(t)=100\frac{RER(t)}{RER^*}')
-with st.spinner('Retrieving monthly IMF data…'):
+with st.spinner('Retrieving monthly IMF and Eurostat data…'):
     data, rer_mean, n, diagnostics = calculate(c1, c2, start, end)
 
-st.subheader('IMF data availability')
+st.subheader('Data availability (IMF and Eurostat)')
 st.dataframe(diagnostics.drop(columns=['Details']), use_container_width=True, hide_index=True)
 with st.expander('API diagnostics (exact series requests)'):
     st.dataframe(diagnostics, use_container_width=True, hide_index=True)
-    st.caption('A missing IMF series is not replaced with another series or country. Euro Area G163 may require a different published dataset; the exact CPI key is not confirmed available.')
+    st.caption('Euro Area (G163) price index uses Eurostat monthly all-items HICP, not IMF CPI. All other requested series use IMF SDMX 3.0.')
 
 m1, m2, m3 = st.columns(3)
 m1.metric('Valid RER months', f'{n:,} / {len(data):,}')
@@ -194,146 +243,14 @@ elif selection == "Both" and not n:
     st.caption("The combined dual-axis chart requires a valid real index and will appear when both CPI series are available.")
 
 if c1 == "G163" or c2 == "G163":
-    if diagnostics.loc[(diagnostics["Country"].str.contains("G163")) & (diagnostics["Series"] == "CPI"), "Status"].eq("Unavailable").any():
-        st.info("Euro Area CPI is not returned by the current IMF CPI series key. The IMF publishes a CPI_WCA aggregate dataset, but its precise Euro Area monthly key has not yet been verified. No replacement series has been assumed.")
+    st.info("Euro Area price series: Eurostat all-items monthly HICP (prc_hicp_minr, geo=EA, coicop18=TOTAL, unit=I25, 2025=100). Other CPI and exchange rates: IMF. HICP is not identical to IMF CPI.")
 
 st.subheader('Download sample data')
 output = data.reset_index().copy()
 output['Month'] = output['Month'].dt.strftime('%Y-%m')
 output['RER_sample_mean'] = rer_mean if n else float('nan')
-st.download_button('⬇️ Download CSV (all sample months)', output.to_csv(index=False).encode('utf-8'), file_name=f'IMF_RER_{c1}_{c2}_{start:%Y%m}_{end:%Y%m}.csv', mime='text/csv')
+st.download_button('⬇️ Download CSV (all sample months)', output.to_csv(index=False).encode('utf-8'), file_name=f'RER_IMF_Eurostat_{c1}_{c2}_{start:%Y%m}_{end:%Y%m}.csv', mime='text/csv')
 with st.expander('View monthly observations and calculations'):
     st.dataframe(output, use_container_width=True, hide_index=True)
 with st.expander('Methodology and limitations'):
-    st.markdown('''**Nominal rate:** E2/E1, where each E is local currency units per USD. **Real rate:** S × P1/P2. **Sample mean:** arithmetic mean of valid monthly RER observations in the selected period. **Real index:** 100 × RER / sample mean. CPI reference bases can differ, but constant base differences cancel in the normalized real index. Missing observations are not interpolated. The nominal series can have observations in months where CPI is missing. CPI and FX coverage varies by country and may begin after 1976. Euro Area uses IMF code G163. Source: IMF SDMX 3.0 API; series keys COUNTRY.CPI._T.IX.M and COUNTRY.XDC_USD.PA_RT.M.''')
-# ============================================================
-# EURO AREA CPI — RAW IMF API DIAGNOSTICS
-# ============================================================
-
-with st.expander("🔍 Investigate Euro Area CPI API response"):
-
-    if st.button("Test Euro Area CPI request"):
-
-        test_url = (
-            "https://api.imf.org/external/sdmx/3.0/"
-            "data/dataflow/IMF.STA/CPI/~/G163.CPI._T.IX.M"
-        )
-
-        try:
-            headers = {"Accept": "text/csv"}
-
-            response = requests.get(
-                test_url,
-                params={"c[TIME_PERIOD]": "ge:1976-M01"},
-                headers=headers,
-                timeout=45
-            )
-
-            st.write("HTTP status:", response.status_code)
-            st.write("Response URL:", response.url)
-            st.write("Content type:", response.headers.get("Content-Type"))
-            st.write("Response size:", len(response.content), "bytes")
-
-            if response.ok:
-
-                raw_df = pd.read_csv(
-                    io.StringIO(response.text),
-                    low_memory=False
-                )
-
-                st.write("Number of rows:", len(raw_df))
-                st.write("Columns:", raw_df.columns.tolist())
-
-                st.write("First 10 rows:")
-                st.dataframe(raw_df.head(10))
-
-                for column in ["COUNTRY", "REF_AREA"]:
-
-                    if column in raw_df.columns:
-
-                        st.write(
-                            f"Values in {column}:",
-                            raw_df[column]
-                            .dropna()
-                            .astype(str)
-                            .unique()
-                            .tolist()[:20]
-                        )
-
-                if "OBS_VALUE" in raw_df.columns:
-
-                    st.write(
-                        "Non-missing observations:",
-                        raw_df["OBS_VALUE"].notna().sum()
-                    )
-
-            else:
-                st.code(response.text[:2000])
-
-        except Exception as error:
-            st.error(f"Diagnostic request failed: {error}")
-# ============================================================
-# EURO AREA CPI_WCA DATASET TEST
-# ============================================================
-
-with st.expander("🔍 Investigate IMF CPI_WCA dataset"):
-
-    if st.button("Test CPI_WCA dataset"):
-
-        url = (
-            "https://api.imf.org/external/sdmx/3.0/"
-            "data/dataflow/IMF.STA/CPI_WCA/~/"
-        )
-
-        try:
-            response = requests.get(
-                url,
-                params={
-                    "c[TIME_PERIOD]": "ge:2020-M01"
-                },
-                headers={"Accept": "text/csv"},
-                timeout=60
-            )
-
-            st.write("HTTP status:", response.status_code)
-            st.write("Response size:", len(response.content))
-
-            if response.ok:
-
-                df = pd.read_csv(
-                    io.StringIO(response.text),
-                    low_memory=False
-                )
-
-                st.write("Number of rows:", len(df))
-                st.write("Columns:", df.columns.tolist())
-
-                st.dataframe(df.head(10))
-
-                for col in ["COUNTRY", "REF_AREA"]:
-                    if col in df.columns:
-
-                        values = (
-                            df[col]
-                            .dropna()
-                            .astype(str)
-                            .unique()
-                            .tolist()
-                        )
-
-                        st.write(
-                            f"Unique {col} values:",
-                            values[:100]
-                        )
-
-                if "OBS_VALUE" in df.columns:
-                    st.write(
-                        "Non-missing observations:",
-                        df["OBS_VALUE"].notna().sum()
-                    )
-
-            else:
-                st.code(response.text[:2000])
-
-        except Exception as error:
-            st.error(str(error))
+    st.markdown('''**Nominal rate:** E2/E1, where each E is local currency units per USD. **Real rate:** S × P1/P2. **Sample mean:** arithmetic mean of valid monthly RER observations in the selected period. **Real index:** 100 × RER / sample mean. CPI reference bases can differ, but constant base differences cancel in the normalized real index. Missing observations are not interpolated. The nominal series can have observations in months where CPI is missing. CPI and FX coverage varies by country and may begin after 1976. Euro Area uses IMF code G163. Sources: IMF SDMX 3.0 API for all exchange rates and non-Euro-Area CPI (keys COUNTRY.CPI._T.IX.M and COUNTRY.XDC_USD.PA_RT.M); Eurostat prc_hicp_minr, geo=EA, coicop18=TOTAL, unit=I25 for Euro Area monthly all-items HICP (2025=100). The Euro Area HICP is not the same measure as IMF CPI. The Euro Area aggregate may reflect changes in euro-area membership over time.''')
