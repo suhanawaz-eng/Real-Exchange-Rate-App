@@ -58,13 +58,22 @@ def fetch_series(country: str, dataset: str) -> pd.Series:
         raise RuntimeError(f'Unexpected IMF {dataset} response for {country}. Columns: {list(df.columns)}. Verify IMF dataflow and key.')
     # Some IMF SDMX CSV responses identify the reference area as REF_AREA.
     # Do not silently filter out the series when a provider uses different identifiers.
-    for area_col in ('COUNTRY', 'REF_AREA'):
-        if area_col in df.columns:
-            area = df[area_col].astype(str).str.strip().str.upper()
-            if (area == country.upper()).any():
-                df = df.loc[area == country.upper()].copy()
-            else:
-                raise RuntimeError(f'IMF {dataset} response for {country} contains {area_col} values {area.dropna().unique()[:8].tolist()}, not the requested area. Check dataflow/key.')
+    area_columns = [col for col in ('REF_AREA', 'COUNTRY') if col in df.columns]
+    if area_columns:
+        matched = False
+        for area_col in area_columns:
+            area = df[area_col].astype('string').str.strip().str.upper()
+            mask = area.eq(country.upper()).fillna(False)
+            if mask.any():
+                df = df.loc[mask].copy()
+                matched = True
+                break
+        if not matched:
+            details = {col: df[col].dropna().astype(str).unique()[:8].tolist() for col in area_columns}
+            raise RuntimeError(
+                f'IMF {dataset} response does not identify {country}. '
+                f'Area values: {details}. Response columns: {list(df.columns)}'
+            )
     if 'FREQUENCY' in df.columns:
         df = df[df['FREQUENCY'].astype(str).str.upper() == 'M']
     # Normalize SDMX period strings to one consistent datetime64[ns] dtype.
