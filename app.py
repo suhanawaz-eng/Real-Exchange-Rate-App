@@ -60,10 +60,16 @@ def fetch_series(country: str, dataset: str) -> pd.Series:
         df = df[df['COUNTRY'].astype(str).str.upper() == country]
     if 'FREQUENCY' in df.columns:
         df = df[df['FREQUENCY'].astype(str).str.upper() == 'M']
-    df['month'] = df['TIME_PERIOD'].map(period_to_date)
+    # Normalize SDMX period strings to one consistent datetime64[ns] dtype.
+    # .map(period_to_date) can yield an object Series on mixed API values,
+    # causing TypeError when compared with a pandas Timestamp.
+    periods = df['TIME_PERIOD'].astype('string').str.strip()
+    periods = periods.str.replace(r'^(\d{4})-M(\d{1,2})$', r'\1-\2', regex=True)
+    periods = periods.str.replace(r'^(\d{4})-(\d)$', r'\1-0\2', regex=True)
+    df['month'] = pd.to_datetime(periods.str.slice(0, 7) + '-01', errors='coerce', format='%Y-%m-%d', utc=True).dt.tz_localize(None)
     df['value'] = pd.to_numeric(df['OBS_VALUE'], errors='coerce')
     df = df.dropna(subset=['month', 'value'])
-    df = df[(df['month'] >= START) & (df['value'] > 0)]
+    df = df.loc[(df['month'] >= START) & (df['value'] > 0)].copy()
     if df['month'].duplicated().any():
         raise RuntimeError(f'Multiple {dataset} observations found for {country} in one month; verify the IMF series dimensions.')
     return pd.Series(df['value'].to_numpy(), index=pd.DatetimeIndex(df['month']), name=f'{dataset}_{country}').sort_index()
