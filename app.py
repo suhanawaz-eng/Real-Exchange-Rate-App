@@ -48,7 +48,7 @@ def fetch_series(country: str, dataset: str) -> pd.Series:
     except requests.RequestException as exc:
         raise RuntimeError(f'IMF {dataset} request failed for {country}: {exc}') from exc
     if not response.content or not response.text.strip():
-        return pd.Series(dtype='float64', name=f'{dataset}_{country}')
+        raise RuntimeError(f'IMF returned an empty response for {country} {dataset} ({url}). Check series availability and dataflow.')
     try:
         df = pd.read_csv(io.StringIO(response.text), low_memory=False)
     except Exception as exc:
@@ -56,8 +56,15 @@ def fetch_series(country: str, dataset: str) -> pd.Series:
     df.columns = df.columns.str.strip().str.upper()
     if not {'TIME_PERIOD', 'OBS_VALUE'}.issubset(df.columns):
         raise RuntimeError(f'Unexpected IMF {dataset} response for {country}. Columns: {list(df.columns)}. Verify IMF dataflow and key.')
-    if 'COUNTRY' in df.columns:
-        df = df[df['COUNTRY'].astype(str).str.upper() == country]
+    # Some IMF SDMX CSV responses identify the reference area as REF_AREA.
+    # Do not silently filter out the series when a provider uses different identifiers.
+    for area_col in ('COUNTRY', 'REF_AREA'):
+        if area_col in df.columns:
+            area = df[area_col].astype(str).str.strip().str.upper()
+            if (area == country.upper()).any():
+                df = df.loc[area == country.upper()].copy()
+            else:
+                raise RuntimeError(f'IMF {dataset} response for {country} contains {area_col} values {area.dropna().unique()[:8].tolist()}, not the requested area. Check dataflow/key.')
     if 'FREQUENCY' in df.columns:
         df = df[df['FREQUENCY'].astype(str).str.upper() == 'M']
     # Normalize SDMX period strings to one consistent datetime64[ns] dtype.
@@ -68,8 +75,11 @@ def fetch_series(country: str, dataset: str) -> pd.Series:
     periods = periods.str.replace(r'^(\d{4})-(\d)$', r'\1-0\2', regex=True)
     df['month'] = pd.to_datetime(periods.str.slice(0, 7) + '-01', errors='coerce', format='%Y-%m-%d', utc=True).dt.tz_localize(None)
     df['value'] = pd.to_numeric(df['OBS_VALUE'], errors='coerce')
+    raw_count = len(df)
     df = df.dropna(subset=['month', 'value'])
     df = df.loc[(df['month'] >= START) & (df['value'] > 0)].copy()
+    if df.empty:
+        raise RuntimeError(f'No valid monthly observations for {country} {dataset} (response rows: {raw_count}; columns: {list(df.columns)}). IMF series may be unavailable or encoded differently. Request: {url}')
     if df['month'].duplicated().any():
         raise RuntimeError(f'Multiple {dataset} observations found for {country} in one month; verify the IMF series dimensions.')
     return pd.Series(df['value'].to_numpy(), index=pd.DatetimeIndex(df['month']), name=f'{dataset}_{country}').sort_index()
@@ -156,7 +166,11 @@ m1.metric('Valid RER months', f'{n:,} / {len(data):,}')
 m2.metric('Sample mean RER*', f'{rer_mean:,.6g}' if n else 'Unavailable')
 m3.metric('Sample period', f'{start:%b %Y} – {end:%b %Y}')
 if n == 0:
-    st.warning('No valid overlapping CPI and FX observations for this country pair and sample. Try another pair or period.')
+    st.warning('No overlapping valid CPI and FX observations. Check series diagnostics below; a missing series is not the same as missing months.')
+    with st.expander('Series diagnostics', expanded=True):
+        for col in ['P1_CPI', 'P2_CPI', 'E1_per_USD', 'E2_per_USD']:
+            valid_dates = data.index[data[col].notna()]
+            st.write(f'**{col}**: {len(valid_dates)} valid months' + (f' ({valid_dates.min():%Y-%m} to {valid_dates.max():%Y-%m})' if len(valid_dates) else ' — none in sample'))
 else:
     st.caption('Valid RER months require CPI and local-currency-per-USD FX observations for both countries in the SAME month. Missing months are skipped, never filled.')
     if selection in ('Real', 'Both'):
