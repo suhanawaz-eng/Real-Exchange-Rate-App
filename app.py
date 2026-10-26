@@ -206,3 +206,69 @@ with st.expander('View monthly observations and calculations'):
     st.dataframe(output, use_container_width=True, hide_index=True)
 with st.expander('Methodology and limitations'):
     st.markdown('''**Nominal rate:** E2/E1, where each E is local currency units per USD. **Real rate:** S × P1/P2. **Sample mean:** arithmetic mean of valid monthly RER observations in the selected period. **Real index:** 100 × RER / sample mean. CPI reference bases can differ, but constant base differences cancel in the normalized real index. Missing observations are not interpolated. The nominal series can have observations in months where CPI is missing. CPI and FX coverage varies by country and may begin after 1976. Euro Area uses IMF code G163. Source: IMF SDMX 3.0 API; series keys COUNTRY.CPI._T.IX.M and COUNTRY.XDC_USD.PA_RT.M.''')
+# ============================================================
+# EURO AREA CPI — RAW IMF API DIAGNOSTICS
+# ============================================================
+
+with st.expander("🔍 Investigate Euro Area CPI API response"):
+
+    if st.button("Test Euro Area CPI request"):
+
+        test_url = (
+            "https://api.imf.org/external/sdmx/3.0/"
+            "data/dataflow/IMF.STA/CPI/~/G163.CPI._T.IX.M"
+        )
+
+        try:
+            headers = {"Accept": "text/csv"}
+
+            response = requests.get(
+                test_url,
+                params={"c[TIME_PERIOD]": "ge:1976-M01"},
+                headers=headers,
+                timeout=45
+            )
+
+            st.write("HTTP status:", response.status_code)
+            st.write("Response URL:", response.url)
+            st.write("Content type:", response.headers.get("Content-Type"))
+            st.write("Response size:", len(response.content), "bytes")
+
+            if response.ok:
+
+                raw_df = pd.read_csv(
+                    io.StringIO(response.text),
+                    low_memory=False
+                )
+
+                st.write("Number of rows:", len(raw_df))
+                st.write("Columns:", raw_df.columns.tolist())
+
+                st.write("First 10 rows:")
+                st.dataframe(raw_df.head(10))
+
+                for column in ["COUNTRY", "REF_AREA"]:
+
+                    if column in raw_df.columns:
+
+                        st.write(
+                            f"Values in {column}:",
+                            raw_df[column]
+                            .dropna()
+                            .astype(str)
+                            .unique()
+                            .tolist()[:20]
+                        )
+
+                if "OBS_VALUE" in raw_df.columns:
+
+                    st.write(
+                        "Non-missing observations:",
+                        raw_df["OBS_VALUE"].notna().sum()
+                    )
+
+            else:
+                st.code(response.text[:2000])
+
+        except Exception as error:
+            st.error(f"Diagnostic request failed: {error}")
