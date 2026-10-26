@@ -272,3 +272,68 @@ with st.expander("🔍 Investigate Euro Area CPI API response"):
 
         except Exception as error:
             st.error(f"Diagnostic request failed: {error}")
+# ============================================================
+# EURO AREA CPI_WCA DATASET TEST
+# ============================================================
+
+with st.expander("🔍 Investigate IMF CPI_WCA dataset"):
+
+    if st.button("Test CPI_WCA dataset"):
+
+        url = (
+            "https://api.imf.org/external/sdmx/3.0/"
+            "data/dataflow/IMF.STA/CPI_WCA/~/"
+        )
+
+        try:
+            response = requests.get(
+                url,
+                params={
+                    "c[TIME_PERIOD]": "ge:2020-M01"
+                },
+                headers={"Accept": "text/csv"},
+                timeout=60
+            )
+
+            st.write("HTTP status:", response.status_code)
+            st.write("Response size:", len(response.content))
+
+            if response.ok:
+
+                df = pd.read_csv(
+                    io.StringIO(response.text),
+                    low_memory=False
+                )
+
+                st.write("Number of rows:", len(df))
+                st.write("Columns:", df.columns.tolist())
+
+                st.dataframe(df.head(10))
+
+                for col in ["COUNTRY", "REF_AREA"]:
+                    if col in df.columns:
+
+                        values = (
+                            df[col]
+                            .dropna()
+                            .astype(str)
+                            .unique()
+                            .tolist()
+                        )
+
+                        st.write(
+                            f"Unique {col} values:",
+                            values[:100]
+                        )
+
+                if "OBS_VALUE" in df.columns:
+                    st.write(
+                        "Non-missing observations:",
+                        df["OBS_VALUE"].notna().sum()
+                    )
+
+            else:
+                st.code(response.text[:2000])
+
+        except Exception as error:
+            st.error(str(error))
